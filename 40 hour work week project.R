@@ -1,6 +1,6 @@
 library(tidyverse)
 library(survey)
-
+options(scipen = 999)
 #load up file with databases across years
 datafiles <- list.files(path = "/Users/max/Desktop/ESI",
                    pattern = "esi_202.*csv",
@@ -73,12 +73,19 @@ normalized_diff <- function(design, covariate, group_var, treated_label, control
 years <- 2021:2025
 covariates <- c("edad", "sexo") 
 
-results <- expand.grid(year = years, covariate = covariates, stringsAsFactors = FALSE) |>
+results_public <- expand.grid(year = years, covariate = covariates, stringsAsFactors = FALSE) |>
   mutate(nd = pmap_dbl(list(covariate, year), function(cov, yr) {
     normalized_diff(design, cov, "group", "treated_private", "control_public", yr)
   }))
 
-results
+results_public
+
+results_honorarios <- expand.grid(year = years, covariate = covariates, stringsAsFactors = FALSE) |>
+  mutate(nd = pmap_dbl(list(covariate, year), function(cov, yr) {
+    normalized_diff(design, cov, "group", "treated_private", "control_honorarios", yr)
+  }))
+
+results_honorarios
 
 library(readxl)
 
@@ -188,3 +195,111 @@ summary(model_ddd_linear)
 
 #Calculation #4 (prediction)
 
+coefs_hours <- coef(model_hours_public)
+
+years <- c(2021, 2022, 2023, 2024, 2025)
+
+get_control_mean <- function(year) {
+  if (year == 2023) return(coefs_hours["(Intercept)"])
+  term <- paste0("year_ref", year)
+  coefs_hours["(Intercept)"] + coefs_hours[term]
+}
+
+get_treated_mean <- function(year) {
+  base <- get_control_mean(year) + coefs_hours["grouptreated_private"]
+  if (year == 2023) return(base)
+  interaction_term <- paste0("grouptreated_private:year_ref", year)
+  base + coefs_hours[interaction_term]
+}
+
+treated_actual <- sapply(years, get_treated_mean)
+control_actual <- sapply(years, get_control_mean)
+
+treated_2023 <- get_treated_mean(2023)
+control_2023 <- get_control_mean(2023)
+
+treated_counterfactual <- treated_2023 + (control_actual - control_2023)
+
+treated_gap <- treated_actual - treated_counterfactual
+
+plot_data <- data.frame(
+  year = rep(2021:2025, 2),
+  value = c(treated_actual, treated_counterfactual),
+  type = rep(c("With policy", "Without Policy (counterfactual)"), each = 5)
+)
+
+ggplot(plot_data, aes(x= year, y= value, color= type)) +
+  geom_line()+
+  geom_vline(xintercept = 2024, linetype = "dotted", color = "black")+
+  annotate("text", x = 2024.1, y = max(plot_data$value), label = "Policy takes effect", hjust = 0, size = 3)+
+  labs(title = "Average of hours worked in private workers with policy vs without policy",
+       x= "Year", y= "Weekly hours worked")
+
+#Calculation 4 (salary)
+
+coefs_salary <- coef(model_salary_public) 
+
+control_2023_salary <- coefs_salary["(Intercept)"]
+treated_2023_salary <- coefs_salary["(Intercept)"] + coefs_salary["grouptreated_private"]
+
+get_control_salary <- function(year) {
+  if (year == 2023) return(coefs_salary["(Intercept)"])
+  coefs_salary["(Intercept)"] + coefs_salary[paste0("year_ref", year)]
+}
+
+get_treated_salary <- function(year) {
+  base <- get_control_salary(year) + coefs_salary["grouptreated_private"]
+  if (year == 2023) return(base)
+  base + coefs_salary[paste0("grouptreated_private:year_ref", year)]
+}
+
+treated_actual_salary <- sapply(years, get_treated_salary)
+control_actual_salary <- sapply(years, get_control_salary)
+
+treated_counterfactual_salary <- treated_2023_salary + (control_actual_salary - control_2023_salary)
+
+plot_data_salary <- data.frame(
+  year = rep(2021:2025, 2),
+  value = c(treated_actual_salary, treated_counterfactual_salary),
+  type = rep(c("With policy", "Without Policy (counterfactual)"), each = 5)
+)
+
+ggplot(plot_data_salary, aes(x= year, y= value, color= type)) +
+  geom_line()+
+  geom_vline(xintercept = 2024, linetype = "dotted", color = "black")+
+  annotate("text", x = 2024.1, y = max(plot_data_salary$value), label = "Policy takes effect", hjust = 0, size = 3)+
+  scale_y_continuous(
+    limits = c(750000, 1000000),
+    breaks = seq(750000, 1000000, by = 50000),
+    labels = seq(750000, 1000000, by = 50000)
+  )+
+  labs(title = "Average salary for private workers with policy vs without policy",
+       x= "Year", y= "Average Wage (Chilean pesos)")
+
+#Calculation 5 (Placebo test)
+
+dataset$post_placebo <- if_else(dataset$ano_encuesta %in% c(2022, 2023), 1, 0)
+
+design <- svydesign(
+  id = ~unique_cluster,
+  strata = ~unique_strata,
+  weights = ~fact_cal_esi,
+  check.strata = T,
+  nest = T,
+  data = dataset)
+
+private_public <- design$variables$group %in% c("treated_private", "control_public")
+design_public <- design[private_public, ]
+
+placebo_years <- design_public$variables$ano_encuesta %in% c(2021, 2022, 2023)
+design_public_placebo <- design_public[placebo_years, ]
+
+options(survey.lonely.psu = "remove")
+
+model_hours_public_placebo <- svyglm(
+  habituales ~ group * post_placebo,
+  design = design_public_placebo,
+  family = gaussian()
+)
+
+summary(model_hours_public_placebo)
